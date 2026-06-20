@@ -48,6 +48,8 @@ type Agent struct {
 	keys                      []gossh.PublicKey                                     // SSH public keys
 	smartManager              *SmartManager                                         // Manages SMART data
 	systemdManager            *systemdManager                                       // Manages systemd services
+	processMonitor            *ProcessMonitor                                       // Monitors top processes
+	processMonitorEnabled     bool                                                  // Whether process monitoring is enabled
 }
 
 // NewAgent creates a new agent with the given data directory for persisting data.
@@ -143,6 +145,14 @@ func NewAgent(dataDir ...string) (agent *Agent, err error) {
 		slog.Debug("GPU", "err", err)
 	}
 
+	// initialize process monitor
+	agent.processMonitor = NewProcessMonitor()
+	if processMonitorEnv, exists := utils.GetEnv("PROCESS_MONITOR"); exists && processMonitorEnv == "true" {
+		agent.processMonitorEnabled = true
+		agent.processMonitor.Enable(defaultTopN, nil, defaultProcessInterval)
+		slog.Info("Process monitor enabled")
+	}
+
 	// if debugging, print stats
 	if agent.debug {
 		slog.Debug("Stats", "data", agent.gatherStats(common.DataRequestOptions{CacheTimeMs: defaultDataCacheTimeMs, IncludeDetails: true}))
@@ -211,6 +221,21 @@ func (a *Agent) gatherStats(options common.DataRequestOptions) *system.CombinedD
 
 	a.cache.Set(data, cacheTimeMs)
 
+	if a.processMonitorEnabled && a.processMonitor != nil && cacheTimeMs == defaultDataCacheTimeMs {
+		processes := a.processMonitor.GetTopProcesses()
+		if len(processes) > 0 {
+			data.Processes = make([]system.ProcessInfo, 0, len(processes))
+			for _, p := range processes {
+				data.Processes = append(data.Processes, system.ProcessInfo{
+					PID:    p.PID,
+					Name:   p.Name,
+					CPU:    p.CPU,
+					Memory: p.Memory,
+				})
+			}
+		}
+	}
+
 	return a.attachSystemDetails(data, cacheTimeMs, options.IncludeDetails)
 }
 
@@ -222,4 +247,12 @@ func (a *Agent) Start(serverOptions ServerOptions) error {
 
 func (a *Agent) getFingerprint() string {
 	return GetFingerprint(a.dataDir, a.systemDetails.Hostname, a.systemDetails.CpuModel)
+}
+
+func (a *Agent) EnableProcessMonitor(topN int, blacklist []string) {
+	if a.processMonitor == nil {
+		a.processMonitor = NewProcessMonitor()
+	}
+	a.processMonitor.Enable(topN, blacklist, defaultProcessInterval)
+	a.processMonitorEnabled = true
 }

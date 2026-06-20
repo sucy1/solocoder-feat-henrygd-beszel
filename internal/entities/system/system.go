@@ -179,4 +179,12 @@ type CombinedData struct {
 	Containers      []*container.Stats `json:"container" cbor:"2,keyasint"`
 	SystemdServices []*systemd.Service `json:"systemd,omitempty" cbor:"3,keyasint,omitempty"`
 	Details         *Details           `cbor:"4,keyasint,omitempty"`
+	Processes       []ProcessInfo      `json:"processes,omitempty" cbor:"5,keyasint,omitempty"`
+}
+
+type ProcessInfo struct {
+	PID    int32   `json:"pid" cbor:"0,keyasint"`
+	Name   string  `json:"name" cbor:"1,keyasint"`
+	CPU    float64 `json:"cpu" cbor:"2,keyasint"`
+	Memory float32 `json:"mem" cbor:"3,keyasint"`
 }

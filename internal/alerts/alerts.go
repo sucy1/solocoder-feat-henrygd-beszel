@@ -24,6 +24,7 @@ type AlertManager struct {
 	stopOnce      sync.Once
 	pendingAlerts sync.Map
 	alertsCache   *AlertsCache
+	notifier      *Notifier
 }
 
 type AlertMessageData struct {
@@ -100,6 +101,7 @@ func NewAlertManager(app hubLike) *AlertManager {
 	am := &AlertManager{
 		hub:         app,
 		alertsCache: NewAlertsCache(app),
+		notifier:    NewNotifier(),
 	}
 	am.bindEvents()
 	return am
@@ -192,11 +194,11 @@ func (am *AlertManager) IsNotificationSilenced(userID, systemID string) bool {
 	return false
 }
 
-// SendAlert sends an alert to the user
+// SendAlert sends an alert to the user via all configured channels
 func (am *AlertManager) SendAlert(data AlertMessageData) error {
-	// Check if alert is silenced
+	// Check if alert is silenced by quiet hours
 	if am.IsNotificationSilenced(data.UserID, data.SystemID) {
-		am.hub.Logger().Info("Notification silenced", "user", data.UserID, "system", data.SystemID, "title", data.Title)
+		am.hub.Logger().Info("Notification silenced by quiet hours", "user", data.UserID, "system", data.SystemID, "title", data.Title)
 		return nil
 	}
 
@@ -216,35 +218,86 @@ func (am *AlertManager) SendAlert(data AlertMessageData) error {
 	if err := record.UnmarshalJSONField("settings", &userAlertSettings); err != nil {
 		am.hub.Logger().Error("Failed to unmarshal user settings", "err", err)
 	}
-	// send alerts via webhooks
-	for _, webhook := range userAlertSettings.Webhooks {
-		if err := am.SendShoutrrrAlert(webhook, data.Title, data.Message, data.Link, data.LinkText); err != nil {
-			am.hub.Logger().Error("Failed to send shoutrrr alert", "err", err)
+
+	alertName := data.Title
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errors []error
+
+	// send email alerts
+	if len(userAlertSettings.Emails) > 0 {
+		for _, email := range userAlertSettings.Emails {
+			if am.notifier.IsSilenced(data.UserID, data.SystemID, alertName, ChannelEmail) {
+				am.hub.Logger().Info("Email notification silenced", "user", data.UserID, "email", email, "title", data.Title)
+				continue
+			}
+			wg.Add(1)
+			go func(emailAddr string) {
+				defer wg.Done()
+				err := am.sendWithRetry(ChannelEmail, func() error {
+					return am.sendEmailAlert(emailAddr, data.Title, data.Message, data.Link)
+				})
+				if err != nil {
+					mu.Lock()
+					errors = append(errors, fmt.Errorf("email to %s: %w", emailAddr, err))
+					mu.Unlock()
+					am.hub.Logger().Error("Failed to send email alert after retries", "email", emailAddr, "err", err)
+				} else {
+					am.notifier.MarkSent(data.UserID, data.SystemID, alertName, ChannelEmail)
+					am.hub.Logger().Info("Sent email alert", "to", emailAddr, "subj", data.Title)
+				}
+			}(email)
 		}
 	}
-	// send alerts via email
-	if len(userAlertSettings.Emails) == 0 {
-		return nil
+
+	// send alerts via webhooks (slack, telegram, etc.)
+	for _, webhook := range userAlertSettings.Webhooks {
+		channelType := detectChannelType(webhook)
+		if am.notifier.IsSilenced(data.UserID, data.SystemID, alertName, channelType) {
+			am.hub.Logger().Info("Webhook notification silenced", "user", data.UserID, "channel", channelType, "title", data.Title)
+			continue
+		}
+		wg.Add(1)
+		go func(wh string, ch notificationChannel) {
+			defer wg.Done()
+			err := am.sendWithRetry(ch, func() error {
+				return am.SendShoutrrrAlert(wh, data.Title, data.Message, data.Link, data.LinkText)
+			})
+			if err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("%s webhook: %w", ch, err))
+				mu.Unlock()
+				am.hub.Logger().Error("Failed to send webhook alert after retries", "channel", ch, "err", err)
+			} else {
+				am.notifier.MarkSent(data.UserID, data.SystemID, alertName, ch)
+			}
+		}(webhook, channelType)
 	}
-	addresses := []mail.Address{}
-	for _, email := range userAlertSettings.Emails {
-		addresses = append(addresses, mail.Address{Address: email})
+
+	wg.Wait()
+
+	// cleanup old silences periodically
+	go am.notifier.CleanupOldSilences()
+
+	if len(errors) > 0 {
+		return fmt.Errorf("some notifications failed: %v", errors)
 	}
-	message := mailer.Message{
+	return nil
+}
+
+func (am *AlertManager) sendEmailAlert(to, subject, message, link string) error {
+	addresses := []mail.Address{{Address: to}}
+	msg := mailer.Message{
 		To:      addresses,
-		Subject: data.Title,
-		Text:    data.Message + fmt.Sprintf("\n\n%s", data.Link),
+		Subject: subject,
+		Text:    message + fmt.Sprintf("\n\n%s", link),
 		From: mail.Address{
 			Address: am.hub.Settings().Meta.SenderAddress,
 			Name:    am.hub.Settings().Meta.SenderName,
 		},
 	}
-	err = am.hub.NewMailClient().Send(&message)
-	if err != nil {
-		return err
-	}
-	am.hub.Logger().Info("Sent email alert", "to", message.To, "subj", message.Subject)
-	return nil
+	return am.hub.NewMailClient().Send(&msg)
 }
 
 // SendShoutrrrAlert sends an alert via a Shoutrrr URL

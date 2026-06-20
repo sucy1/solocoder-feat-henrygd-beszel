@@ -16,10 +16,13 @@ import (
 
 // cli options
 type cmdOptions struct {
-	key    string // key is the public key(s) for SSH authentication.
-	listen string // listen is the address or port to listen on.
-	hubURL string // hubURL is the URL of the Beszel hub.
-	token  string // token is the token to use for authentication.
+	key             string   // key is the public key(s) for SSH authentication.
+	listen          string   // listen is the address or port to listen on.
+	hubURL          string   // hubURL is the URL of the Beszel hub.
+	token           string   // token is the token to use for authentication.
+	processMonitor  bool     // processMonitor enables process monitoring.
+	processTopN     int      // processTopN is the number of top processes to monitor.
+	processBlacklist []string // processBlacklist is the list of process names to exclude.
 }
 
 // parse parses the command line flags and populates the config struct.
@@ -49,6 +52,9 @@ func (opts *cmdOptions) parse() bool {
 	pflag.StringVarP(&opts.listen, "listen", "l", "", "Address or port to listen on")
 	pflag.StringVarP(&opts.hubURL, "url", "u", "", "URL of the Beszel hub")
 	pflag.StringVarP(&opts.token, "token", "t", "", "Token to use for authentication")
+	pflag.BoolVar(&opts.processMonitor, "process-monitor", false, "Enable process monitoring")
+	pflag.IntVar(&opts.processTopN, "process-top-n", 10, "Number of top processes to monitor")
+	pflag.StringSliceVar(&opts.processBlacklist, "process-blacklist", nil, "List of process names to exclude from monitoring")
 	chinaMirrors := pflag.BoolP("china-mirrors", "c", false, "Use mirror for update (gh.beszel.dev) instead of GitHub")
 	version := pflag.BoolP("version", "v", false, "Show version information")
 	help := pflag.BoolP("help", "h", false, "Show this help message")
@@ -192,6 +198,12 @@ func main() {
 	a, err := agent.NewAgent()
 	if err != nil {
 		log.Fatal("Failed to create agent: ", err)
+	}
+
+	if opts.processMonitor {
+		os.Setenv("PROCESS_MONITOR", "true")
+		a.EnableProcessMonitor(opts.processTopN, opts.processBlacklist)
+		log.Printf("Process monitor enabled (top %d processes)", opts.processTopN)
 	}
 
 	if err := a.Start(serverConfig); err != nil {
