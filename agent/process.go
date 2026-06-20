@@ -15,13 +15,13 @@ const (
 )
 
 type ProcessMonitor struct {
-	enabled      bool
-	topN         int
-	blacklist    map[string]struct{}
-	interval     time.Duration
+	enabled       bool
+	topN          int
+	blacklist     []string
+	interval      time.Duration
 	lastProcesses []ProcessInfo
-	mu           sync.RWMutex
-	lastUpdate   time.Time
+	mu            sync.RWMutex
+	lastUpdate    time.Time
 }
 
 type ProcessInfo struct {
@@ -36,7 +36,7 @@ func NewProcessMonitor() *ProcessMonitor {
 	return &ProcessMonitor{
 		enabled:   false,
 		topN:      defaultTopN,
-		blacklist: make(map[string]struct{}),
+		blacklist: []string{},
 		interval:  defaultProcessInterval,
 	}
 }
@@ -52,10 +52,23 @@ func (pm *ProcessMonitor) Enable(topN int, blacklist []string, interval time.Dur
 	if interval > 0 {
 		pm.interval = interval
 	}
-	pm.blacklist = make(map[string]struct{}, len(blacklist))
+	pm.blacklist = make([]string, 0, len(blacklist))
 	for _, name := range blacklist {
-		pm.blacklist[strings.ToLower(name)] = struct{}{}
+		lower := strings.ToLower(strings.TrimSpace(name))
+		if lower != "" {
+			pm.blacklist = append(pm.blacklist, lower)
+		}
 	}
+}
+
+func (pm *ProcessMonitor) isBlacklisted(name string) bool {
+	lowerName := strings.ToLower(name)
+	for _, pattern := range pm.blacklist {
+		if strings.Contains(lowerName, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func (pm *ProcessMonitor) IsEnabled() bool {
@@ -100,7 +113,7 @@ func (pm *ProcessMonitor) refreshProcesses() []ProcessInfo {
 			continue
 		}
 
-		if _, blacklisted := pm.blacklist[strings.ToLower(name)]; blacklisted {
+		if pm.isBlacklisted(name) {
 			continue
 		}
 

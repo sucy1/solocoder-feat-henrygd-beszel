@@ -101,7 +101,7 @@ func NewAlertManager(app hubLike) *AlertManager {
 	am := &AlertManager{
 		hub:         app,
 		alertsCache: NewAlertsCache(app),
-		notifier:    NewNotifier(),
+		notifier:    NewNotifier(app),
 	}
 	am.bindEvents()
 	return am
@@ -243,6 +243,7 @@ func (am *AlertManager) SendAlert(data AlertMessageData) error {
 					errors = append(errors, fmt.Errorf("email to %s: %w", emailAddr, err))
 					mu.Unlock()
 					am.hub.Logger().Error("Failed to send email alert after retries", "email", emailAddr, "err", err)
+					am.notifier.RecordFailure(data.UserID, data.SystemID, alertName, ChannelEmail, err.Error())
 				} else {
 					am.notifier.MarkSent(data.UserID, data.SystemID, alertName, ChannelEmail)
 					am.hub.Logger().Info("Sent email alert", "to", emailAddr, "subj", data.Title)
@@ -269,6 +270,7 @@ func (am *AlertManager) SendAlert(data AlertMessageData) error {
 				errors = append(errors, fmt.Errorf("%s webhook: %w", ch, err))
 				mu.Unlock()
 				am.hub.Logger().Error("Failed to send webhook alert after retries", "channel", ch, "err", err)
+				am.notifier.RecordFailure(data.UserID, data.SystemID, alertName, ch, err.Error())
 			} else {
 				am.notifier.MarkSent(data.UserID, data.SystemID, alertName, ch)
 			}
