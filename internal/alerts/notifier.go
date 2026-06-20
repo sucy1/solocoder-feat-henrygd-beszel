@@ -1,17 +1,17 @@
 package alerts
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/pocketbase/dbx"
-	"github.com/pocketbase/pocketbase/core"
 )
 
 const (
-	maxRetries         = 3
-	defaultMinSilence  = 5 * time.Minute
-	retryBaseDelay     = 2 * time.Second
+	maxRetries        = 3
+	defaultMinSilence = 5 * time.Minute
+	retryBaseDelay    = 2 * time.Second
 )
 
 type notificationChannel string
@@ -36,14 +36,19 @@ type NotificationFailure struct {
 	Time    time.Time
 }
 
-type Notifier struct {
-	mu            sync.RWMutex
-	silenceMap    map[silenceKey]time.Time
-	minSilence    time.Duration
-	app           core.App
+type dbLike interface {
+	DB() *dbx.DB
+	Logger() *slog.Logger
 }
 
-func NewNotifier(app core.App) *Notifier {
+type Notifier struct {
+	mu         sync.RWMutex
+	silenceMap map[silenceKey]time.Time
+	minSilence time.Duration
+	app        dbLike
+}
+
+func NewNotifier(app dbLike) *Notifier {
 	n := &Notifier{
 		silenceMap: make(map[silenceKey]time.Time),
 		minSilence: defaultMinSilence,
@@ -93,18 +98,20 @@ func (n *Notifier) MarkSent(userID, systemID, alertName string, channel notifica
 }
 
 func (n *Notifier) RecordFailure(userID, systemID, alertName string, channel notificationChannel, reason string) {
-	type failureRecord struct {
-		User      string    `db:"user"`
-		System    string    `db:"system"`
-		AlertName string    `db:"alert_name"`
-		Channel   string    `db:"channel"`
-		Reason    string    `db:"reason"`
-		Created   time.Time `db:"created"`
-	}
 	if n.app == nil {
 		return
 	}
-	_, _ = n.app.DB().
+	logger := n.app.Logger()
+	if logger != nil {
+		logger.Error("Alert notification failed",
+			"user", userID,
+			"system", systemID,
+			"alert", alertName,
+			"channel", string(channel),
+			"reason", reason,
+		)
+	}
+	_, err := n.app.DB().
 		Insert("notification_failures", dbx.Params{
 			"user":       userID,
 			"system":     systemID,
@@ -114,6 +121,9 @@ func (n *Notifier) RecordFailure(userID, systemID, alertName string, channel not
 			"created":    time.Now().UTC(),
 		}).
 		Execute()
+	if err != nil && logger != nil {
+		logger.Error("Failed to persist notification failure to DB", "err", err)
+	}
 }
 
 func (n *Notifier) GetFailures(userID string, since time.Duration) []NotificationFailure {
@@ -121,12 +131,12 @@ func (n *Notifier) GetFailures(userID string, since time.Duration) []Notificatio
 		return nil
 	}
 	type dbRecord struct {
-		Channel   string    `db:"channel"`
-		Reason    string    `db:"reason"`
-		Created   time.Time `db:"created"`
+		Channel string    `db:"channel"`
+		Reason  string    `db:"reason"`
+		Created time.Time `db:"created"`
 	}
 	var records []dbRecord
-	_ = n.app.DB().
+	err := n.app.DB().
 		Select("channel", "reason", "created").
 		From("notification_failures").
 		Where(dbx.NewExp("user = {:user} AND created > {:since}", dbx.Params{
@@ -136,6 +146,9 @@ func (n *Notifier) GetFailures(userID string, since time.Duration) []Notificatio
 		OrderBy("created DESC").
 		Limit(100).
 		All(&records)
+	if err != nil && n.app.Logger() != nil {
+		n.app.Logger().Error("Failed to query notification failures", "err", err)
+	}
 
 	failures := make([]NotificationFailure, 0, len(records))
 	for _, r := range records {
@@ -158,11 +171,14 @@ func (n *Notifier) CleanupOldSilences() {
 		}
 	}
 	if n.app != nil {
-		_, _ = n.app.DB().
+		_, err := n.app.DB().
 			Delete("notification_silences", dbx.NewExp("last_sent < {:cutoff}", dbx.Params{
 				"cutoff": cutoff.UTC(),
 			})).
 			Execute()
+		if err != nil && n.app.Logger() != nil {
+			n.app.Logger().Error("Failed to clean up old notification silences", "err", err)
+		}
 	}
 }
 
@@ -170,6 +186,7 @@ func (n *Notifier) loadSilencesFromDB() error {
 	if n.app == nil {
 		return nil
 	}
+	logger := n.app.Logger()
 	type dbSilence struct {
 		UserID    string    `db:"user"`
 		SystemID  string    `db:"system"`
@@ -185,6 +202,9 @@ func (n *Notifier) loadSilencesFromDB() error {
 		Where(dbx.NewExp("last_sent >= {:cutoff}", dbx.Params{"cutoff": cutoff})).
 		All(&records)
 	if err != nil {
+		if logger != nil {
+			logger.Error("Failed to load notification silences from DB", "err", err)
+		}
 		return err
 	}
 	n.mu.Lock()
@@ -198,6 +218,9 @@ func (n *Notifier) loadSilencesFromDB() error {
 		}
 		n.silenceMap[key] = r.LastSent
 	}
+	if logger != nil {
+		logger.Info("Loaded notification silences from DB", "count", len(records))
+	}
 	return nil
 }
 
@@ -205,6 +228,7 @@ func (n *Notifier) persistSilenceToDB(userID, systemID, alertName, channel strin
 	if n.app == nil {
 		return nil
 	}
+	logger := n.app.Logger()
 	existing := struct {
 		ID string `db:"id"`
 	}{}
@@ -225,6 +249,9 @@ func (n *Notifier) persistSilenceToDB(userID, systemID, alertName, channel strin
 		_, err = n.app.DB().
 			Update("notification_silences", dbx.Params{"last_sent": t.UTC()}, dbx.NewExp("id = {:id}", dbx.Params{"id": existing.ID})).
 			Execute()
+		if err != nil && logger != nil {
+			logger.Error("Failed to update notification silence in DB", "err", err)
+		}
 		return err
 	}
 
@@ -237,6 +264,9 @@ func (n *Notifier) persistSilenceToDB(userID, systemID, alertName, channel strin
 			"last_sent":  t.UTC(),
 		}).
 		Execute()
+	if err != nil && logger != nil {
+		logger.Error("Failed to insert notification silence into DB", "err", err)
+	}
 	return err
 }
 

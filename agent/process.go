@@ -10,14 +10,14 @@ import (
 )
 
 const (
-	defaultTopN          = 10
+	defaultTopN            = 10
 	defaultProcessInterval = 60 * time.Second
 )
 
 type ProcessMonitor struct {
 	enabled       bool
 	topN          int
-	blacklist     []string
+	blacklist     map[string]struct{}
 	interval      time.Duration
 	lastProcesses []ProcessInfo
 	mu            sync.RWMutex
@@ -36,7 +36,7 @@ func NewProcessMonitor() *ProcessMonitor {
 	return &ProcessMonitor{
 		enabled:   false,
 		topN:      defaultTopN,
-		blacklist: []string{},
+		blacklist: make(map[string]struct{}),
 		interval:  defaultProcessInterval,
 	}
 }
@@ -52,23 +52,18 @@ func (pm *ProcessMonitor) Enable(topN int, blacklist []string, interval time.Dur
 	if interval > 0 {
 		pm.interval = interval
 	}
-	pm.blacklist = make([]string, 0, len(blacklist))
+	pm.blacklist = make(map[string]struct{}, len(blacklist))
 	for _, name := range blacklist {
 		lower := strings.ToLower(strings.TrimSpace(name))
 		if lower != "" {
-			pm.blacklist = append(pm.blacklist, lower)
+			pm.blacklist[lower] = struct{}{}
 		}
 	}
 }
 
 func (pm *ProcessMonitor) isBlacklisted(name string) bool {
-	lowerName := strings.ToLower(name)
-	for _, pattern := range pm.blacklist {
-		if strings.Contains(lowerName, pattern) {
-			return true
-		}
-	}
-	return false
+	_, ok := pm.blacklist[strings.ToLower(name)]
+	return ok
 }
 
 func (pm *ProcessMonitor) IsEnabled() bool {
